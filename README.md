@@ -18,6 +18,10 @@
   * **事前ネタバレ全廃**：ヒントなしの障害症状から自律調査。
   * **既存コードベース外科手術（Brownfield）**：数千行リポジトリのボトルネック特定・最小パッチ（git diff）。
   * **非公開Holdoutテストによる決定論的合否判定**：高難度（シニア級）を維持したまま純粋なAgent性を測定。
+* **[`v4/`](./v4/)**: 決定論的自己完結版（Deterministic & Self-Contained Edition）
+  * **非特権・完全自己完結**：systemd/cgroups/外部DB依存を排除し、Python標準・ASGI・SQLite WAL・メモリ制御でColabや非特権コンテナでも即実行可能。
+  * **公開テスト vs 非公開Holdoutテストの二層分離**：自己修正ループと過学習判定の完全自動化。
+  * **内包ハーネスランナー**：`harness/runner.py` により各問20点・計500点満点を自動集計。
 
 ---
 
@@ -27,26 +31,17 @@
 ai-benchmarks/
 ├── README.md
 ├── v1/
-│   ├── README.md
-│   ├── 01_agent/
-│   ├── 02_low_level/
-│   ├── 03_high_level/
-│   ├── 04_logical_reasoning/
-│   └── 05_info_integration/
 ├── v2/
-│   ├── README.md
-│   ├── 01_agent/
-│   ├── 02_low_level/
-│   ├── 03_high_level/
-│   ├── 04_logical_reasoning/
-│   └── 05_info_integration/
-└── v3/
+├── v3/
+└── v4/
     ├── README.md
-    ├── 01_agent/               # Agent性（CLI自律調査・インフラ障害復旧・ブラックボックス調査）
-    ├── 02_low_level/           # 低レイヤー（cgroups制約突破・並行キュー競合・バイナリ復旧）
-    ├── 03_high_level/          # 高レイヤー（FSMゾンビ状態解消・Sagaカオス耐性・差分マージ競合）
-    ├── 04_logical_reasoning/   # 論理推論（探索空間枝刈り・PostgreSQLデッドロック・Raft合意分断）
-    └── 05_info_integration/   # 情報統合（Proto-OpenAPI型崩れ・トレーシングデータ破壊・IAM昇格PoC）
+    ├── harness/
+    │   └── runner.py           # 決定論的採点・実行ハーネスランナー
+    ├── 01_agent/               # Agent性（ASGIソケット障害・Webhook HMAC・メモリリーク・Git復旧・Flaky撲滅）
+    ├── 02_low_level/           # 低レイヤー（外部マージソート・SPMCリングバッファ・非整列ビットパック・Lazy Refill・SSTable）
+    ├── 03_high_level/          # 高レイヤー（FSMゾンビ解消・サーキットブレーカー・Saga補償・依存スキーマDAG・3-Way差分）
+    ├── 04_logical_reasoning/   # 論理推論（CSP/SATタイムテーブル・Spot配置・メッシュ閉路・SQLite WALデッドロック・Raft分断）
+    └── 05_info_integration/   # 情報統合（gRPC/OpenAPI型・OTelトレース特定・クラウドIAM昇格・シンプソンSQL・DRドリフト）
 ```
 
 ---
