@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+benchmark_runs/
+gemini_results/
+sandbox/
+*.log

@@ -22,6 +22,7 @@
   * **非特権・完全自己完結**：systemd/cgroups/外部DB依存を排除し、Python標準・ASGI・SQLite WAL・メモリ制御でColabや非特権コンテナでも即実行可能。
   * **公開テスト vs 非公開Holdoutテストの二層分離**：自己修正ループと過学習判定の完全自動化。
   * **内包ハーネスランナー**：`harness/runner.py` により各問20点・計500点満点を自動集計。
+* **[G4 × ローカルPodman 自律対話エージェント運用仕様書](./docs/G4_BENCHMARK_SPEC.md)**: Colab G4（RTX PRO 6000 Blackwell）と手元サンドボックス連携による125試行自律ベンチマーク運用手順とアーキテクチャ仕様。
 
 ---
 

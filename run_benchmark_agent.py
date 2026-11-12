@@ -35,12 +35,11 @@ SYSTEM_PROMPT = """You are an expert autonomous software engineer solving an eng
 You can investigate the environment, read files, edit code, and run tests by executing Bash shell commands.
 
 CRITICAL INSTRUCTIONS:
-1. Do NOT call or invoke any built-in tools or functions. You must only output text.
-2. To execute commands in the sandbox environment, write them inside a single ```bash ... ``` code block, or call `<tool_call> bash<param_key>command</param_key><param_value>YOUR_BASH_COMMAND</param_value></tool_call>`.
-3. The harness executes your bash command in the isolated sandbox container and feeds back the terminal output in the next turn.
-4. To inspect files, use `cat <path>` or `head`/`tail`. To edit or patch files, use `python3 -c ...`, `sed`, or heredocs (`cat << 'EOF' > ...`).
-5. After diagnosing the root cause, you MUST write the fix to the files, restart any affected services if needed, and run the test suite to verify the fix.
-6. When you have resolved the issue and verified your fix with tests, print "COMPLETE" on its own line to submit your solution.
+1. You have access to a single Bash shell execution environment.
+2. To run commands, write them inside a single ```bash ... ``` code block, or call `<tool_call> bash<param_key>command</param_key><param_value>YOUR_BASH_COMMAND</param_value></tool_call>`.
+3. To inspect files, use `cat <path>` or `head`/`tail`. To edit files, use `python3 -c ...`, `sed`, or heredocs (`cat << 'EOF' > ...`).
+4. Keep commands focused and decisive (e.g. inspecting logs, reading files, patching files, running pytest).
+5. When you have resolved the issue and verified your fix with tests, print "COMPLETE" on its own line to submit your solution.
 """
 
 TASK_CONFIGS = {
@@ -73,17 +72,7 @@ TASK_CONFIGS = {
 
 def clean_sandbox_completely():
     """Physically delete all files in host sandbox and kill any leftover container processes."""
-    # 1. Kill leftover container daemons and wipe /workspace and /tmp in container
-    try:
-        subprocess.run(
-            ["podman", "exec", "bench-box", "bash", "-c", 
-             "pkill -9 -f uvicorn 2>/dev/null || true; pkill -9 -f python3 2>/dev/null || true; rm -rf /workspace/* /workspace/.* /tmp/* /tmp/.* 2>/dev/null || true"],
-            timeout=10, capture_output=True, text=True, check=False
-        )
-    except Exception as e:
-        print(f"[!] Warning cleaning container: {e}")
-
-    # 2. Clean host directory
+    # 1. Clean host directory
     if os.path.exists(SANDBOX_HOST_DIR):
         for item in os.listdir(SANDBOX_HOST_DIR):
             item_path = os.path.join(SANDBOX_HOST_DIR, item)
@@ -99,6 +88,16 @@ def clean_sandbox_completely():
         os.chmod(SANDBOX_HOST_DIR, 0o777)
     except Exception:
         pass
+
+    # 2. Kill leftover container daemons and wipe /tmp in container
+    try:
+        subprocess.run(
+            ["podman", "exec", "bench-box", "bash", "-c", 
+             "pkill -9 -f uvicorn 2>/dev/null || true; pkill -9 -f python3 2>/dev/null || true; rm -rf /tmp/* /tmp/.* 2>/dev/null || true"],
+            timeout=10, capture_output=True, text=True, check=False
+        )
+    except Exception as e:
+        print(f"[!] Warning cleaning container /tmp: {e}")
 
 def exec_sandbox_command(cmd, timeout=COMMAND_TIMEOUT_SEC):
     # Enforce PYTHONDONTWRITEBYTECODE=1 to eradicate __pycache__ pollution
@@ -208,7 +207,7 @@ def extract_bash_commands(text):
             return m_code[0].strip()
     return ""
 
-def query_llm_http(api_url, messages, temperature=0.2, max_tokens=4096, retries=4):
+def query_llm(api_url, messages, temperature=0.2, max_tokens=4096, retries=4):
     curr_messages = list(messages)
     last_err = None
     for attempt in range(retries):
@@ -248,6 +247,7 @@ def query_llm_http(api_url, messages, temperature=0.2, max_tokens=4096, retries=
             print(f"[!] API call HTTP {e.code} retry {attempt+1}/{retries}: {e}")
             if e.code == 400 and len(curr_messages) > 3:
                 print("[!] 400 Bad Request detected (likely context overflow) -> Truncating old turns...")
+                # Keep system prompt (idx 0) and initial user prompt (idx 1), truncate middle
                 curr_messages = [curr_messages[0], curr_messages[1]] + curr_messages[4:]
             time.sleep(2 ** attempt)
         except Exception as e:
@@ -256,50 +256,8 @@ def query_llm_http(api_url, messages, temperature=0.2, max_tokens=4096, retries=
             time.sleep(2 ** attempt)
     raise RuntimeError(f"Failed to query LLM after {retries} retries: {last_err}")
 
-def query_llm_agy(model_slug, prompt, conversation_id=None, timeout=180, retries=3):
-    agy_path = shutil.which("agy") or "/home/takayoshi/.local/bin/agy"
-    last_err = None
-    for attempt in range(retries):
-        try:
-            if conversation_id:
-                cmd = [agy_path, "--conversation", conversation_id, "--dangerously-skip-permissions", "--output-format", "json", "-p", prompt]
-            else:
-                cmd = [agy_path, "--model", model_slug, "--dangerously-skip-permissions", "--output-format", "json", "-p", prompt]
-            
-            t0 = time.time()
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-            dur = time.time() - t0
-            
-            if res.returncode != 0:
-                print(f"[!] agy returned code {res.returncode}: {res.stderr}")
-                raise RuntimeError(f"agy execution failed: {res.stderr}")
-            
-            data = json.loads(res.stdout)
-            content = data.get("response", "") or ""
-            cid = data.get("conversation_id", "")
-            duration = data.get("duration_seconds", dur)
-            usage = data.get("usage", {})
-            p_toks = usage.get("input_tokens", 0)
-            c_toks = usage.get("output_tokens", 0)
-            tok_s = c_toks / duration if duration > 0 else 0
-            
-            return {
-                "content": content,
-                "reasoning": "",
-                "duration": duration,
-                "prompt_tokens": p_toks,
-                "completion_tokens": c_toks,
-                "tok_s": tok_s,
-                "conversation_id": cid
-            }
-        except Exception as e:
-            last_err = e
-            print(f"[!] agy call retry {attempt+1}/{retries} due to: {e}")
-            time.sleep(2 ** attempt)
-    raise RuntimeError(f"Failed to query agy after {retries} retries: {last_err}")
-
-def load_or_init_results(model_slug, custom_path=None):
-    res_path = custom_path if custom_path else os.path.join(RUNS_DIR, f"results_{model_slug}.json")
+def load_or_init_results(model_slug):
+    res_path = os.path.join(RUNS_DIR, f"results_{model_slug}.json")
     if os.path.exists(res_path):
         try:
             with open(res_path, "r") as f:
@@ -320,14 +278,14 @@ def save_results(data, res_path):
         json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp_path, res_path)
 
-def run_trial(api_url, task, temperature, max_turns=MAX_TURNS_PER_TRIAL, engine="http", model_slug=""):
+def run_trial(api_url, task, temperature, max_turns=MAX_TURNS_PER_TRIAL):
     task_id = task["id"]
     task_title = task["title"]
     task_spec = task["content"]
     cfg = TASK_CONFIGS[task_id]
     
     print(f"\n=================================================================")
-    print(f"▶ Task {task_id}: {task_title} (Temp: {temperature} | Engine: {engine} | Model: {model_slug})")
+    print(f"▶ Task {task_id}: {task_title} (Temp: {temperature})")
     print(f"=================================================================")
     
     # 1. Physically clean and reset sandbox
@@ -370,21 +328,10 @@ def run_trial(api_url, task, temperature, max_turns=MAX_TURNS_PER_TRIAL, engine=
     passed = False
     score = 0
     last_test_stdout = ""
-    agy_cid = None
     
     for turn in range(1, max_turns + 1):
         print(f"\n--- Turn {turn}/{max_turns} ---")
-        if engine == "agy":
-            if turn == 1:
-                prompt = f"{SYSTEM_PROMPT}\n\nTask Specification:\n\n{task_spec}\n\nPlease begin by investigating the workspace and diagnosing the issue."
-                llm_resp = query_llm_agy(model_slug, prompt, conversation_id=None)
-                agy_cid = llm_resp.get("conversation_id")
-            else:
-                prompt = next_prompt
-                llm_resp = query_llm_agy(model_slug, prompt, conversation_id=agy_cid)
-        else:
-            llm_resp = query_llm_http(api_url, messages, temperature=temperature)
-
+        llm_resp = query_llm(api_url, messages, temperature=temperature)
         content = llm_resp["content"]
         reasoning = llm_resp["reasoning"]
         tok_s = llm_resp["tok_s"]
@@ -413,8 +360,7 @@ def run_trial(api_url, task, temperature, max_turns=MAX_TURNS_PER_TRIAL, engine=
                     dialogue_history.append({"turn": turn, "content": content, "reasoning": reasoning, "action": "SUBMIT_PASS"})
                     break
             print("[-] No bash command detected. Asking model to continue...")
-            next_prompt = "Please provide a bash command in a ```bash ... ``` code block to investigate or solve the task, or print COMPLETE when finished."
-            messages.append({"role": "user", "content": next_prompt})
+            messages.append({"role": "user", "content": "Please provide a bash command in a ```bash ... ``` code block to investigate or solve the task, or print COMPLETE when finished."})
             dialogue_history.append({"turn": turn, "content": content, "reasoning": reasoning, "action": "NO_CMD"})
             continue
             
@@ -439,7 +385,6 @@ def run_trial(api_url, task, temperature, max_turns=MAX_TURNS_PER_TRIAL, engine=
             if stderr:
                 feedback += f"STDERR:\n{stderr}\n"
             
-        next_prompt = feedback
         messages.append({"role": "user", "content": feedback})
         dialogue_history.append({
             "turn": turn,
@@ -487,18 +432,12 @@ def run_trial(api_url, task, temperature, max_turns=MAX_TURNS_PER_TRIAL, engine=
 
 def main():
     parser = argparse.ArgumentParser(description="ai-benchmarks v4 Autonomous Agent Runner")
-    parser.add_argument("--api-url", type=str, default="", help="Colab LLM API URL (for http engine)")
-    parser.add_argument("--engine", type=str, choices=["http", "agy"], default="http", help="LLM execution engine")
-    parser.add_argument("--model-slug", type=str, default="gpt-oss-120b-medium", help="Model slug name")
+    parser.add_argument("--api-url", type=str, required=True, help="Colab LLM API URL")
+    parser.add_argument("--model-slug", type=str, default="k2-horizon-mova-36b-a4b", help="Model slug name")
     parser.add_argument("--temps", type=float, nargs="+", default=DEFAULT_TEMPS, help="Temperatures to run")
     parser.add_argument("--task-id", type=str, help="Run specific task ID only (e.g. 1-1)")
-    parser.add_argument("--output-file", type=str, default="", help="Custom output path for results JSON")
     parser.add_argument("--reset", action="store_true", help="Reset existing results for this model")
     args = parser.parse_args()
-    
-    if args.engine == "http" and not args.api_url:
-        print("[!] Error: --api-url is required when --engine is 'http'")
-        sys.exit(1)
     
     with open(os.path.join(BASE_DIR, "v4_tasks.json"), "r") as f:
         all_tasks = json.load(f)
@@ -515,13 +454,13 @@ def main():
     else:
         tasks = scoped_tasks
         
-    res_path_target = args.output_file if args.output_file else os.path.join(RUNS_DIR, f"results_{args.model_slug}.json")
     if args.reset:
-        if os.path.exists(res_path_target):
-            os.remove(res_path_target)
-            print(f"[✓] Reset existing results file: {res_path_target}")
+        res_path = os.path.join(RUNS_DIR, f"results_{args.model_slug}.json")
+        if os.path.exists(res_path):
+            os.remove(res_path)
+            print(f"[✓] Reset existing results file: {res_path}")
 
-    results_data, res_path = load_or_init_results(args.model_slug, custom_path=args.output_file)
+    results_data, res_path = load_or_init_results(args.model_slug)
     print(f"Loaded results from: {res_path}")
     print(f"Total available tasks: {len(tasks)} ({[t['id'] for t in tasks]}) | Temperatures: {args.temps}")
     
@@ -542,7 +481,7 @@ def main():
                 continue
                 
             try:
-                trial_res = run_trial(args.api_url, task, temp, engine=args.engine, model_slug=args.model_slug)
+                trial_res = run_trial(args.api_url, task, temp)
             except Exception as e:
                 print(f"\n[!] ERROR in Task {tid} Temp {temp}: {e}")
                 trial_res = {
